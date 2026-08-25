@@ -61,7 +61,7 @@
 </script>
 
 <svelte:head>
-  <title>Project Earth — Terrain v0.2</title>
+  <title>Project Earth — Terrain v0.3</title>
   <meta
     name="description"
     content="Real USGS terrain converted into adaptive low-poly Delaunay geometry"
@@ -79,7 +79,7 @@
 
   <header class="brand">
     <strong>PROJECT EARTH</strong>
-    <span>Terrain study · v0.2</span>
+    <span>Terrain + river study · v0.3</span>
   </header>
 
   <div class="backend">{status.backend}</div>

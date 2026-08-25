@@ -5,6 +5,7 @@ import { bodyPosition } from './celestial';
 import { localToGeoUtm } from './utm';
 import { TerrainRegionSource } from './TerrainRegionSource';
 import { AdaptiveTerrain, type TerrainMeshStats } from './AdaptiveTerrain';
+import { Water } from './Water';
 
 export const START = {
   lat: 36.0643,
@@ -46,6 +47,10 @@ export class Game {
 
   private readonly source = new TerrainRegionSource();
   private readonly adaptive = new AdaptiveTerrain(this.scene);
+  private readonly water = new Water(
+    this.scene,
+    (x, z) => this.adaptive.sampleRenderedHeight(x, z)
+  );
   private region: Awaited<ReturnType<TerrainRegionSource['load']>> | null = null;
 
   private readonly keys = new Set<string>();
@@ -96,6 +101,9 @@ export class Game {
 
     this.region = await this.source.load();
     this.adaptive.rebuild(this.region, this.requestedError);
+    void this.water.load(this.requestedError).catch((error) => {
+      console.warn('River water unavailable:', error);
+    });
 
     const ground = this.source.sampleLocal(0, 0) ?? 2100;
     this.camera.position.set(0, ground + 900, 1800);
@@ -116,6 +124,7 @@ export class Game {
     this.rebuildTimer = setTimeout(() => {
       if (!this.region) return;
       this.adaptive.rebuild(this.region, this.requestedError);
+      this.water.rebuild(this.requestedError);
       this.emitStatus();
     }, 120);
   }
@@ -318,6 +327,7 @@ export class Game {
     window.removeEventListener('resize', this.resize);
     window.removeEventListener('keydown', this.keyDown);
     window.removeEventListener('keyup', this.keyUp);
+    this.water.dispose();
     this.adaptive.dispose();
     this.renderer?.dispose();
     this.renderer?.domElement.remove();
