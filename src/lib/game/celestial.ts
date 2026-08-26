@@ -22,7 +22,6 @@ export function bodyPosition(
   const azimuth = hor.azimuth * Math.PI / 180;
   const cosAlt = Math.cos(altitude);
 
-  // Game coordinates: +X east, -Z north, +Y up.
   const direction = new THREE.Vector3(
     cosAlt * Math.sin(azimuth),
     Math.sin(altitude),

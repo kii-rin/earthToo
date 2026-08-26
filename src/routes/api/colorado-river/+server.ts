@@ -1,8 +1,8 @@
 import type { RequestHandler } from './$types';
 import {
-  REGION_SIZE_M,
-  START_UTM_E,
-  START_UTM_N
+  TERRAIN_SIZE_M,
+  TERRAIN_ORIGIN_E,
+  TERRAIN_ORIGIN_N
 } from '$lib/game/TerrainRegionSource';
 
 const COLORADO_RIVER_LAYER =
@@ -27,11 +27,11 @@ type ArcGisResponse = {
 export const GET: RequestHandler = async ({ fetch }) => {
   if (memoryCache) return jsonResponse(memoryCache, true);
 
-  const half = REGION_SIZE_M / 2;
-  const minE = START_UTM_E - half;
-  const maxE = START_UTM_E + half;
-  const minN = START_UTM_N - half;
-  const maxN = START_UTM_N + half;
+  const half = TERRAIN_SIZE_M / 2;
+  const minE = TERRAIN_ORIGIN_E - half;
+  const maxE = TERRAIN_ORIGIN_E + half;
+  const minN = TERRAIN_ORIGIN_N - half;
+  const maxN = TERRAIN_ORIGIN_N + half;
 
   const url = new URL(COLORADO_RIVER_LAYER);
   url.searchParams.set('where', '1=1');
@@ -81,8 +81,8 @@ export const GET: RequestHandler = async ({ fetch }) => {
     for (const path of feature.geometry?.paths ?? []) {
       const local = path
         .map((point): [number, number] => [
-          point[0] - START_UTM_E,
-          START_UTM_N - point[1]
+          point[0] - TERRAIN_ORIGIN_E,
+          TERRAIN_ORIGIN_N - point[1]
         ])
         .filter(([x, z]) => Number.isFinite(x) && Number.isFinite(z));
 

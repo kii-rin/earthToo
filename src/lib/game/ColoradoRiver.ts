@@ -1,26 +1,19 @@
 import * as THREE from 'three/webgpu';
 
-export type WaterRegionPayload = {
+type ColoradoRiverPayload = {
   source: string;
   lines: [number, number][][];
 };
 
-// The river location is real geographic data. The visible adaptive terrain is
-// the shoreline authority, so the water keeps matching the mesh at 8 m error.
 const CENTERLINE_SPACING_M = 10;
 const CENTERLINE_SMOOTH_PASSES = 2;
 const MAX_CENTERLINE_SMOOTH_SHIFT_M = 10;
 
-// Delatin can move the apparent channel floor sideways when the terrain is
-// simplified. Search only near the real river line for the local visible low.
 const CHANNEL_SEARCH_RADIUS_M = 70;
 const CHANNEL_SEARCH_STEP_M = 4;
 const MAX_CHANNEL_SHIFT_M = 55;
 const CHANNEL_SHIFT_SMOOTH_PASSES = 3;
 
-// Water stage compensates for the vertical error of the rendered terrain.
-// Fine terrain stays close to a normal shallow stage; coarse terrain gets
-// extra clearance so simplified channel triangles do not bury the river.
 const BASE_WATER_STAGE_M = 0.8;
 const WATER_STAGE_PER_ERROR = 1.0;
 const MAX_ERROR_STAGE_M = 12.0;
@@ -31,8 +24,6 @@ const WATER_LEVEL_SMOOTH_PASSES = 3;
 const MAX_WATER_LEVEL_ADJUST_M = 2.0;
 const MAX_LEVEL_STEP_M = 0.28;
 
-// Walk across the rendered terrain until it rises through the water surface.
-// No fixed river width: flat low shelves become wet, canyon walls stop water.
 const BANK_SCAN_STEP_M = 3;
 const MAX_HALF_WIDTH_M = 220;
 const BANK_BISECTION_STEPS = 7;
@@ -40,7 +31,7 @@ const DRY_CONFIRM_SAMPLES = 2;
 const WIDTH_SMOOTH_PASSES = 2;
 const MAX_WIDTH_CHANGE_M = 22;
 
-export class Water {
+export class ColoradoRiver {
   private lines: [number, number][][] = [];
   private mesh: THREE.Mesh | null = null;
 
@@ -50,13 +41,13 @@ export class Water {
   ) {}
 
   async load(terrainErrorM = 8): Promise<void> {
-    const response = await fetch('/api/water-region', { cache: 'force-cache' });
+    const response = await fetch('/api/colorado-river', { cache: 'force-cache' });
     if (!response.ok) {
       const detail = await response.text().catch(() => '');
-      throw new Error(`Water region failed: ${response.status} ${detail}`);
+      throw new Error(`Colorado River failed: ${response.status} ${detail}`);
     }
 
-    const payload = await response.json() as WaterRegionPayload;
+    const payload = await response.json() as ColoradoRiverPayload;
     this.lines = payload.lines.filter((line) => line.length >= 2);
     this.rebuild(terrainErrorM);
   }
@@ -73,7 +64,6 @@ export class Water {
       const guide = prepareCenterline(rawLine);
       if (guide.length < 2) continue;
 
-      // First find where the simplified mesh actually places the river low.
       const rawShifts = guide.map((point, index) => {
         const normal = centerlineNormal(guide, index);
         return findVisibleChannelShift(point, normal, this.sampleRenderedGround);
@@ -125,7 +115,6 @@ export class Water {
           continue;
         }
 
-        // Never allow profile smoothing to bury the river in a simplified face.
         const surfaceY = Math.max(level, ground + surfaceClearanceM);
         const normal = centerlineNormal(centers, i);
         const pair = vertexOffset;
@@ -249,7 +238,6 @@ function findBankDistance(
     drySamples++;
     if (drySamples < DRY_CONFIRM_SAMPLES) continue;
 
-    // Find the terrain/water intersection on the visible triangle surface.
     let wet = lastWet;
     let dry = firstDry;
     for (let i = 0; i < BANK_BISECTION_STEPS; i++) {
@@ -314,7 +302,6 @@ function buildWaterProfile(
     levels = next;
   }
 
-  // Remove abrupt profile spikes caused by very large simplified triangles.
   for (let i = 1; i < levels.length; i++) {
     const previous = levels[i - 1];
     const current = levels[i];
@@ -328,7 +315,6 @@ function buildWaterProfile(
     levels[i] = THREE.MathUtils.clamp(current, next - MAX_LEVEL_STEP_M, next + MAX_LEVEL_STEP_M);
   }
 
-  // Surface must remain above the actual visible channel everywhere.
   for (let i = 0; i < levels.length; i++) {
     const ground = channelGround[i];
     if (ground === null) continue;
@@ -338,7 +324,6 @@ function buildWaterProfile(
 
   return levels;
 }
-
 
 function waterStageForTerrainError(terrainErrorM: number): number {
   const error = THREE.MathUtils.clamp(terrainErrorM, 0.5, 100);

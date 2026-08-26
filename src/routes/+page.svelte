@@ -10,13 +10,9 @@
 
   let status: GameStatus = {
     fps: 0,
-    frameMs: 0,
     lat: START.lat,
     lon: START.lon,
-    groundElevation: 0,
-    altitudeAgl: 0,
     triangles: 0,
-    vertices: 0,
     meshError: 0,
     rmsd: 0,
     buildMs: 0,
@@ -28,6 +24,12 @@
   };
 
   onMount(() => {
+    const lockWorld = () => {
+      if (!status.locked && !loading && !error) game?.lock();
+    };
+
+    host.addEventListener('click', lockWorld);
+
     const instance = new Game(host, (next) => (status = next));
     game = instance;
 
@@ -43,7 +45,10 @@
         loading = false;
       });
 
-    return () => instance.stop();
+    return () => {
+      host.removeEventListener('click', lockWorld);
+      instance.stop();
+    };
   });
 
   function changePrecision(event: Event) {
@@ -61,7 +66,7 @@
 </script>
 
 <svelte:head>
-  <title>Project Earth — Terrain v0.3</title>
+  <title>earthToo — USGS 3DEP terrain</title>
   <meta
     name="description"
     content="Real USGS terrain converted into adaptive low-poly Delaunay geometry"
@@ -69,22 +74,18 @@
 </svelte:head>
 
 <div class="shell">
-  <div
-    class="world"
-    bind:this={host}
-    on:click={() => !status.locked && !loading && !error && game?.lock()}
-  ></div>
+  <div class="world" bind:this={host}></div>
 
   <div class="crosshair" class:hidden={!status.locked}></div>
 
   <header class="brand">
-    <strong>PROJECT EARTH</strong>
-    <span>Terrain + river study · v0.3</span>
+    <strong>earthToo</strong>
+    <span>USGS 3DEP · 10 m source grid</span>
   </header>
 
   <div class="backend">{status.backend}</div>
 
-  <aside class="panel" on:mousedown|stopPropagation on:click|stopPropagation>
+  <aside class="panel">
     <div class="headline">
       <strong>{status.fps.toFixed(0)}</strong><span>fps</span>
       <small>{Math.round(status.triangles / 1000)}k tris</small>
@@ -92,7 +93,7 @@
 
     <label>
       <div>
-        <span>Terrain precision</span>
+        <span>Mesh max vertical error</span>
         <b>± {precision.toFixed(1)} m</b>
       </div>
       <input
@@ -103,14 +104,15 @@
         bind:value={precision}
         on:input={changePrecision}
       />
-      <div class="scale"><span>precise</span><span>bold low-poly</span></div>
+      <div class="scale"><span>more geometry</span><span>less geometry</span></div>
     </label>
 
     <div class="detail">
       <span>actual error {status.meshError.toFixed(2)} m</span>
       <span>RMS {status.rmsd.toFixed(2)} m</span>
       <span>build {status.buildMs.toFixed(0)} ms</span>
-      <span>area 16.4 × 16.4 km</span>
+      <span>source grid 10 m</span>
+      <span>area 20.48 × 20.48 km</span>
     </div>
 
     <div class="coords">

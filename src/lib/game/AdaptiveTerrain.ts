@@ -68,7 +68,6 @@ export class AdaptiveTerrain {
       const h1 = tin.heightAt(x1p, y1p);
       const h2 = tin.heightAt(x2p, y2p);
 
-      // USGS raster row 0 is north. Local Z is positive south.
       const ax = x0p * step - half;
       const az = y0p * step - half;
       const bx = x1p * step - half;
@@ -86,7 +85,6 @@ export class AdaptiveTerrain {
       positions[out + 7] = h2;
       positions[out + 8] = cz;
 
-      // One palette color per triangle. Geometry remains the real measured height.
       const abx = bx - ax;
       const aby = h1 - h0;
       const abz = bz - az;
@@ -166,7 +164,7 @@ export class AdaptiveTerrain {
 
     for (const tri of bucket) {
       const o = tri * 9;
-      const ax = positions[o],     ay = positions[o + 1], az = positions[o + 2];
+      const ax = positions[o], ay = positions[o + 1], az = positions[o + 2];
       const bx = positions[o + 3], by = positions[o + 4], bz = positions[o + 5];
       const cx = positions[o + 6], cy = positions[o + 7], cz = positions[o + 8];
 
@@ -246,7 +244,6 @@ function canyonFaceColor(height: number, slope: number, out: THREE.Color): void 
   const steep = THREE.MathUtils.smoothstep(slope, 0.32, 1.18);
   const high = THREE.MathUtils.clamp((height - 700) / 1800, 0, 1);
 
-  // Small, controlled Grand Canyon palette. No random color noise.
   const low = new THREE.Color(0x9a4529);
   const mid = new THREE.Color(0xb86437);
   const upper = new THREE.Color(0xc99058);

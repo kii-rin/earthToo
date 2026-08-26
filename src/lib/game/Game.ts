@@ -3,25 +3,17 @@ import { PointerLockControls } from 'three/addons/controls/PointerLockControls.j
 import * as Astronomy from 'astronomy-engine';
 import { bodyPosition } from './celestial';
 import { localToGeoUtm } from './utm';
-import { TerrainRegionSource } from './TerrainRegionSource';
-import { AdaptiveTerrain, type TerrainMeshStats } from './AdaptiveTerrain';
-import { Water } from './Water';
+import { TerrainRegionSource, type TerrainRegion } from './TerrainRegionSource';
+import { AdaptiveTerrain } from './AdaptiveTerrain';
+import { ColoradoRiver } from './ColoradoRiver';
 
-export const START = {
-  lat: 36.0643,
-  lon: -112.1163,
-  elevation: 0
-};
+export const START = { lat: 36.0643, lon: -112.1163 };
 
 export type GameStatus = {
   fps: number;
-  frameMs: number;
   lat: number;
   lon: number;
-  groundElevation: number;
-  altitudeAgl: number;
   triangles: number;
-  vertices: number;
   meshError: number;
   rmsd: number;
   buildMs: number;
@@ -47,11 +39,11 @@ export class Game {
 
   private readonly source = new TerrainRegionSource();
   private readonly adaptive = new AdaptiveTerrain(this.scene);
-  private readonly water = new Water(
+  private readonly river = new ColoradoRiver(
     this.scene,
     (x, z) => this.adaptive.sampleRenderedHeight(x, z)
   );
-  private region: Awaited<ReturnType<TerrainRegionSource['load']>> | null = null;
+  private region: TerrainRegion | null = null;
 
   private readonly keys = new Set<string>();
   private readonly clock = new THREE.Clock();
@@ -101,8 +93,8 @@ export class Game {
 
     this.region = await this.source.load();
     this.adaptive.rebuild(this.region, this.requestedError);
-    void this.water.load(this.requestedError).catch((error) => {
-      console.warn('River water unavailable:', error);
+    void this.river.load(this.requestedError).catch((error) => {
+      console.warn('Colorado River unavailable:', error);
     });
 
     const ground = this.source.sampleLocal(0, 0) ?? 2100;
@@ -124,7 +116,7 @@ export class Game {
     this.rebuildTimer = setTimeout(() => {
       if (!this.region) return;
       this.adaptive.rebuild(this.region, this.requestedError);
-      this.water.rebuild(this.requestedError);
+      this.river.rebuild(this.requestedError);
       this.emitStatus();
     }, 120);
   }
@@ -157,8 +149,6 @@ export class Game {
     if (this.controls.isLocked) this.move(dt);
 
     if (!this.flyMode) {
-      // Follow the actual rendered adaptive mesh, not the source raster.
-      // This prevents the camera from falling inside large simplified triangles.
       const renderedGround = this.adaptive.sampleRenderedHeight(
         this.camera.position.x,
         this.camera.position.z
@@ -168,7 +158,7 @@ export class Game {
       if (ground !== null) {
         const target = ground + EYE_HEIGHT + 0.22;
         if (target > this.camera.position.y) {
-          this.camera.position.y = target; // never clip upward into the mesh
+          this.camera.position.y = target;
         } else {
           this.camera.position.y += (target - this.camera.position.y) * (1 - Math.exp(-12 * dt));
         }
@@ -264,20 +254,13 @@ export class Game {
 
   private emitStatus(): void {
     const geo = localToGeoUtm(this.camera.position.x, this.camera.position.z);
-    const ground = this.adaptive.sampleRenderedHeight(this.camera.position.x, this.camera.position.z)
-      ?? this.source.sampleLocal(this.camera.position.x, this.camera.position.z)
-      ?? 0;
-    const stats: TerrainMeshStats = this.adaptive.stats;
+    const stats = this.adaptive.stats;
 
     this.onStatus({
       fps: this.fps,
-      frameMs: this.fps > 0 ? 1000 / this.fps : 0,
       lat: geo.lat,
       lon: geo.lon,
-      groundElevation: ground,
-      altitudeAgl: Math.max(0, this.camera.position.y - ground),
       triangles: stats.triangles,
-      vertices: stats.vertices,
       meshError: stats.maxError,
       rmsd: stats.rmsd,
       buildMs: stats.buildMs,
@@ -327,7 +310,7 @@ export class Game {
     window.removeEventListener('resize', this.resize);
     window.removeEventListener('keydown', this.keyDown);
     window.removeEventListener('keyup', this.keyUp);
-    this.water.dispose();
+    this.river.dispose();
     this.adaptive.dispose();
     this.renderer?.dispose();
     this.renderer?.domElement.remove();
