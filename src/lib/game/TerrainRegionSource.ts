@@ -1,11 +1,16 @@
-export const TERRAIN_SPACING_M = 10;
-export const TERRAIN_SEGMENTS = 2048;
-export const TERRAIN_SIDE = TERRAIN_SEGMENTS + 1;
-export const TERRAIN_SIZE_M = TERRAIN_SEGMENTS * TERRAIN_SPACING_M;
-export const TERRAIN_HEIGHT_UNIT_M = 0.5;
+import {
+  TERRAIN_HEIGHT_UNIT_M,
+  terrainSide,
+  terrainSizeM,
+  type TerrainZone
+} from './zones';
 
-export const TERRAIN_ORIGIN_E = 399_470.30152241024;
-export const TERRAIN_ORIGIN_N = 3_991_656.860017819;
+export type TerrainWaterBody = {
+  id: string;
+  name: string;
+  levelM: number;
+  rings: [number, number][][];
+};
 
 export type TerrainRegion = {
   side: number;
@@ -13,43 +18,52 @@ export type TerrainRegion = {
   spacingM: number;
   sizeM: number;
   values: Float32Array;
+  waterBodies: TerrainWaterBody[];
 };
 
 export class TerrainRegionSource {
   private loaded: TerrainRegion | null = null;
 
+  constructor(readonly zone: TerrainZone) {}
+
   async load(): Promise<TerrainRegion> {
     if (this.loaded) return this.loaded;
 
-    const response = await fetch('/api/terrain', { cache: 'force-cache' });
+    const side = terrainSide(this.zone);
+    const response = await fetch(`/api/terrain?zone=${encodeURIComponent(this.zone.id)}`, {
+      cache: 'no-store'
+    });
     if (!response.ok) {
       const detail = await response.text().catch(() => '');
       throw new Error(`Terrain source failed: ${response.status} ${detail}`);
     }
 
     const buffer = await response.arrayBuffer();
-    const expectedBytes = TERRAIN_SIDE * TERRAIN_SIDE * Int16Array.BYTES_PER_ELEMENT;
-    if (buffer.byteLength !== expectedBytes) {
-      throw new Error(
-        `Unexpected terrain payload: ${buffer.byteLength} bytes; expected ${expectedBytes}`
-      );
+    const terrainBytes = side * side * Int16Array.BYTES_PER_ELEMENT;
+    if (buffer.byteLength < terrainBytes) {
+      throw new Error(`Unexpected terrain payload: ${buffer.byteLength} bytes; expected at least ${terrainBytes}`);
     }
 
-    const view = new DataView(buffer);
-    const values = new Float32Array(TERRAIN_SIDE * TERRAIN_SIDE);
-
+    const view = new DataView(buffer, 0, terrainBytes);
+    const values = new Float32Array(side * side);
     for (let i = 0; i < values.length; i++) {
       values[i] = view.getInt16(i * 2, true) * TERRAIN_HEIGHT_UNIT_M;
     }
 
-    this.loaded = {
-      side: TERRAIN_SIDE,
-      segments: TERRAIN_SEGMENTS,
-      spacingM: TERRAIN_SPACING_M,
-      sizeM: TERRAIN_SIZE_M,
-      values
-    };
+    let waterBodies: TerrainWaterBody[] = [];
+    if (buffer.byteLength > terrainBytes) {
+      const json = new TextDecoder().decode(new Uint8Array(buffer, terrainBytes));
+      if (json) waterBodies = JSON.parse(json) as TerrainWaterBody[];
+    }
 
+    this.loaded = {
+      side,
+      segments: this.zone.segments,
+      spacingM: this.zone.spacingM,
+      sizeM: terrainSizeM(this.zone),
+      values,
+      waterBodies
+    };
     return this.loaded;
   }
 

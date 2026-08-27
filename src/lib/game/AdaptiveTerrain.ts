@@ -1,6 +1,7 @@
 import * as THREE from 'three/webgpu';
 import Delatin from 'delatin';
 import type { TerrainRegion } from './TerrainRegionSource';
+import type { TerrainPalette } from './zones';
 
 export type TerrainMeshStats = {
   triangles: number;
@@ -25,7 +26,10 @@ export class AdaptiveTerrain {
     buildMs: 0
   };
 
-  constructor(private readonly scene: THREE.Scene) {}
+  constructor(
+    private readonly scene: THREE.Scene,
+    private readonly palette: TerrainPalette
+  ) {}
 
   rebuild(region: TerrainRegion, maxErrorM: number): TerrainMeshStats {
     const start = performance.now();
@@ -100,7 +104,7 @@ export class AdaptiveTerrain {
       const slope = Math.acos(THREE.MathUtils.clamp(up, 0, 1));
       const avgH = (h0 + h1 + h2) / 3;
 
-      canyonFaceColor(avgH, slope, c);
+      terrainFaceColor(avgH, slope, c, this.palette);
 
       for (let v = 0; v < 3; v++) {
         const ci = out + v * 3;
@@ -164,7 +168,7 @@ export class AdaptiveTerrain {
 
     for (const tri of bucket) {
       const o = tri * 9;
-      const ax = positions[o], ay = positions[o + 1], az = positions[o + 2];
+      const ax = positions[o],     ay = positions[o + 1], az = positions[o + 2];
       const bx = positions[o + 3], by = positions[o + 4], bz = positions[o + 5];
       const cx = positions[o + 6], cy = positions[o + 7], cz = positions[o + 8];
 
@@ -240,7 +244,52 @@ function barycentricHeight(
   return ay * wA + by * wB + cy * wC;
 }
 
-function canyonFaceColor(height: number, slope: number, out: THREE.Color): void {
+function terrainFaceColor(
+  height: number,
+  slope: number,
+  out: THREE.Color,
+  palette: TerrainPalette
+): void {
+  if (palette === 'plains') {
+    const steep = THREE.MathUtils.smoothstep(slope, 0.18, 0.8);
+    const high = THREE.MathUtils.clamp((height - 430) / 220, 0, 1);
+    const low = new THREE.Color(0x708658);
+    const mid = new THREE.Color(0x8c8d5d);
+    const highland = new THREE.Color(0x9b805d);
+    const bank = new THREE.Color(0x5e654c);
+    out.copy(low).lerp(mid, Math.min(1, high * 1.6));
+    if (high > 0.62) out.lerp(highland, (high - 0.62) / 0.38);
+    out.lerp(bank, steep * 0.38);
+    return;
+  }
+
+  if (palette === 'island') {
+    if (height < -12) {
+      const depth = THREE.MathUtils.clamp((-height - 12) / 3500, 0, 1);
+      out.copy(new THREE.Color(0x3d5355)).lerp(new THREE.Color(0x26383d), depth);
+      return;
+    }
+
+    const steep = THREE.MathUtils.smoothstep(slope, 0.28, 1.12);
+    const high = THREE.MathUtils.clamp((height + 10) / 1100, 0, 1);
+    const low = new THREE.Color(0x6f8c52);
+    const mid = new THREE.Color(0x82905a);
+    const upper = new THREE.Color(0x8b7653);
+    const ridge = new THREE.Color(0x8f846d);
+    const cliff = new THREE.Color(0x5b574a);
+
+    if (high < 0.35) {
+      out.copy(low).lerp(mid, high / 0.35);
+    } else if (high < 0.75) {
+      out.copy(mid).lerp(upper, (high - 0.35) / 0.4);
+    } else {
+      out.copy(upper).lerp(ridge, (high - 0.75) / 0.25);
+    }
+
+    out.lerp(cliff, steep * 0.5);
+    return;
+  }
+
   const steep = THREE.MathUtils.smoothstep(slope, 0.32, 1.18);
   const high = THREE.MathUtils.clamp((height - 700) / 1800, 0, 1);
 

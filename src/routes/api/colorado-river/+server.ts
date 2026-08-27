@@ -1,9 +1,5 @@
 import type { RequestHandler } from './$types';
-import {
-  TERRAIN_SIZE_M,
-  TERRAIN_ORIGIN_E,
-  TERRAIN_ORIGIN_N
-} from '$lib/game/TerrainRegionSource';
+import { GRAND_CANYON, terrainSizeM } from '$lib/game/zones';
 
 const COLORADO_RIVER_LAYER =
   'https://grandcanyon.usgs.gov/server/rest/services/BaseLayers/GrandCanyonBaseLayers/MapServer/4/query';
@@ -27,11 +23,11 @@ type ArcGisResponse = {
 export const GET: RequestHandler = async ({ fetch }) => {
   if (memoryCache) return jsonResponse(memoryCache, true);
 
-  const half = TERRAIN_SIZE_M / 2;
-  const minE = TERRAIN_ORIGIN_E - half;
-  const maxE = TERRAIN_ORIGIN_E + half;
-  const minN = TERRAIN_ORIGIN_N - half;
-  const maxN = TERRAIN_ORIGIN_N + half;
+  const half = terrainSizeM(GRAND_CANYON) / 2;
+  const minE = GRAND_CANYON.originE - half;
+  const maxE = GRAND_CANYON.originE + half;
+  const minN = GRAND_CANYON.originN - half;
+  const maxN = GRAND_CANYON.originN + half;
 
   const url = new URL(COLORADO_RIVER_LAYER);
   url.searchParams.set('where', '1=1');
@@ -81,8 +77,8 @@ export const GET: RequestHandler = async ({ fetch }) => {
     for (const path of feature.geometry?.paths ?? []) {
       const local = path
         .map((point): [number, number] => [
-          point[0] - TERRAIN_ORIGIN_E,
-          TERRAIN_ORIGIN_N - point[1]
+          point[0] - GRAND_CANYON.originE,
+          GRAND_CANYON.originN - point[1]
         ])
         .filter(([x, z]) => Number.isFinite(x) && Number.isFinite(z));
 

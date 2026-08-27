@@ -6,8 +6,9 @@ import { localToGeoUtm } from './utm';
 import { TerrainRegionSource, type TerrainRegion } from './TerrainRegionSource';
 import { AdaptiveTerrain } from './AdaptiveTerrain';
 import { ColoradoRiver } from './ColoradoRiver';
-
-export const START = { lat: 36.0643, lon: -112.1163 };
+import { Sea } from './Sea';
+import { Lakes } from './Lakes';
+import type { TerrainZone } from './zones';
 
 export type GameStatus = {
   fps: number;
@@ -22,6 +23,7 @@ export type GameStatus = {
   locked: boolean;
   flyMode: boolean;
   realTime: boolean;
+  waterBodies: number;
 };
 
 const EYE_HEIGHT = 1.72;
@@ -36,28 +38,24 @@ export class Game {
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.PerspectiveCamera(62, 1, 0.3, 30_000);
   private controls!: PointerLockControls;
-
-  private readonly source = new TerrainRegionSource();
-  private readonly adaptive = new AdaptiveTerrain(this.scene);
-  private readonly river = new ColoradoRiver(
-    this.scene,
-    (x, z) => this.adaptive.sampleRenderedHeight(x, z)
-  );
+  private readonly source: TerrainRegionSource;
+  private readonly adaptive: AdaptiveTerrain;
+  private river: ColoradoRiver | null = null;
+  private sea: Sea | null = null;
+  private lakes: Lakes | null = null;
   private region: TerrainRegion | null = null;
-
   private readonly keys = new Set<string>();
   private readonly clock = new THREE.Clock();
   private stopped = false;
+  private eventsBound = false;
   private flyMode = true;
   private realTime = false;
-  private requestedError = 8;
+  private requestedError: number;
   private rebuildTimer: ReturnType<typeof setTimeout> | null = null;
-
   private fpsFrames = 0;
   private fpsWindow = 0;
   private fps = 0;
   private lastStatus = 0;
-
   private readonly sun = new THREE.DirectionalLight(0xffd8a2, 2.35);
   private readonly hemi = new THREE.HemisphereLight(0xbfd8e5, 0x624735, 0.9);
   private readonly fill = new THREE.DirectionalLight(0x9cb8d2, 0.18);
@@ -65,8 +63,16 @@ export class Game {
 
   constructor(
     private readonly host: HTMLElement,
-    private readonly onStatus: (status: GameStatus) => void
-  ) {}
+    readonly zone: TerrainZone,
+    private readonly onStatus: (status: GameStatus) => void,
+    initialError = 8
+  ) {
+    this.requestedError = THREE.MathUtils.clamp(initialError, 0.5, 100);
+    this.camera.far = zone.cameraFarM ?? 30_000;
+    this.camera.updateProjectionMatrix();
+    this.source = new TerrainRegionSource(zone);
+    this.adaptive = new AdaptiveTerrain(this.scene, zone.palette);
+  }
 
   async start(): Promise<void> {
     this.renderer = new THREE.WebGPURenderer({ antialias: true, samples: 2 });
@@ -75,15 +81,17 @@ export class Game {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
     await this.renderer.init();
+    if (this.stopped) {
+      this.renderer.dispose();
+      return;
+    }
 
     this.renderer.domElement.className = 'game-canvas';
     this.host.appendChild(this.renderer.domElement);
-
     this.controls = new PointerLockControls(this.camera, this.renderer.domElement);
 
     this.scene.background = new THREE.Color(0xb9cbd2);
-    this.scene.fog = new THREE.FogExp2(0xb9cbd2, 0.00009);
-
+    this.scene.fog = new THREE.FogExp2(0xb9cbd2, this.zone.fogDensity ?? 0.00009);
     this.scene.add(this.camera, this.sun, this.hemi, this.fill, this.sunTarget);
     this.sun.target = this.sunTarget;
     this.fill.target = this.sunTarget;
@@ -92,21 +100,41 @@ export class Game {
     this.resize();
 
     this.region = await this.source.load();
-    this.adaptive.rebuild(this.region, this.requestedError);
-    void this.river.load(this.requestedError).catch((error) => {
-      console.warn('Colorado River unavailable:', error);
-    });
+    if (this.stopped) return;
 
-    const ground = this.source.sampleLocal(0, 0) ?? 2100;
-    this.camera.position.set(0, ground + 900, 1800);
-    this.camera.lookAt(0, ground, -700);
+    this.adaptive.rebuild(this.region, this.requestedError);
+    if (this.region.waterBodies.length > 0) {
+      this.lakes = new Lakes(this.scene, this.region.waterBodies, this.zone.waterRenderOffsetM ?? 0.2);
+    }
+
+    if (this.zone.coloradoRiver) {
+      this.river = new ColoradoRiver(
+        this.scene,
+        (x, z) => this.adaptive.sampleRenderedHeight(x, z)
+      );
+      void this.river.load(this.requestedError).catch((error) => {
+        console.warn('Colorado River unavailable:', error);
+      });
+    }
+
+    if (this.zone.seaLevelM !== undefined) {
+      this.sea = new Sea(this.scene, this.region.sizeM, this.zone.seaLevelM);
+    }
+
+    const ground = this.source.sampleLocal(0, 0) ?? this.zone.seaLevelM ?? 0;
+    const altitude = this.zone.cameraAltitudeM ?? 900;
+    const back = this.zone.cameraBackM ?? 1800;
+    this.camera.position.set(0, ground + altitude, back);
+    this.camera.lookAt(0, this.zone.seaLevelM ?? ground, 0);
 
     this.updateSky();
     this.clock.start();
     requestAnimationFrame(this.frame);
   }
 
-  lock(): void { this.controls.lock(); }
+  lock(): void {
+    if (this.controls) this.controls.lock();
+  }
 
   setTerrainError(errorM: number): void {
     this.requestedError = THREE.MathUtils.clamp(errorM, 0.5, 100);
@@ -114,9 +142,9 @@ export class Game {
 
     if (this.rebuildTimer) clearTimeout(this.rebuildTimer);
     this.rebuildTimer = setTimeout(() => {
-      if (!this.region) return;
+      if (!this.region || this.stopped) return;
       this.adaptive.rebuild(this.region, this.requestedError);
-      this.river.rebuild(this.requestedError);
+      this.river?.rebuild(this.requestedError);
       this.emitStatus();
     }, 120);
   }
@@ -181,7 +209,6 @@ export class Game {
     if (this.flyMode) {
       const right = new THREE.Vector3().crossVectors(forward, this.camera.up).normalize();
       const move = new THREE.Vector3();
-
       if (this.keys.has('KeyW')) move.add(forward);
       if (this.keys.has('KeyS')) move.sub(forward);
       if (this.keys.has('KeyD')) move.add(right);
@@ -189,16 +216,16 @@ export class Game {
 
       if (move.lengthSq() > 0) {
         move.normalize();
-        const speed =
-          this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')
-            ? FLY_FAST_SPEED
-            : FLY_SPEED;
+        const speed = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')
+          ? (this.zone.flyFastSpeedMps ?? FLY_FAST_SPEED)
+          : (this.zone.flySpeedMps ?? FLY_SPEED);
         this.camera.position.addScaledVector(move, speed * dt);
       }
 
-      if (this.keys.has('Space')) this.camera.position.y += FLY_VERTICAL_SPEED * dt;
+      const verticalSpeed = this.zone.flyVerticalSpeedMps ?? FLY_VERTICAL_SPEED;
+      if (this.keys.has('Space')) this.camera.position.y += verticalSpeed * dt;
       if (this.keys.has('ControlLeft') || this.keys.has('ControlRight')) {
-        this.camera.position.y -= FLY_VERTICAL_SPEED * dt;
+        this.camera.position.y -= verticalSpeed * dt;
       }
       return;
     }
@@ -209,7 +236,6 @@ export class Game {
 
     const right = new THREE.Vector3().crossVectors(forward, this.camera.up).normalize();
     const move = new THREE.Vector3();
-
     if (this.keys.has('KeyW')) move.add(forward);
     if (this.keys.has('KeyS')) move.sub(forward);
     if (this.keys.has('KeyD')) move.add(right);
@@ -217,17 +243,16 @@ export class Game {
 
     if (move.lengthSq() > 0) {
       move.normalize();
-      const speed =
-        this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')
-          ? FAST_SPEED
-          : WALK_SPEED;
+      const speed = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')
+        ? FAST_SPEED
+        : WALK_SPEED;
       this.camera.position.addScaledVector(move, speed * dt);
     }
   }
 
   private updateSky(): void {
-    const geo = localToGeoUtm(this.camera.position.x, this.camera.position.z);
-    const date = this.realTime ? new Date() : inspectionNoonUtc();
+    const geo = localToGeoUtm(this.zone, this.camera.position.x, this.camera.position.z);
+    const date = this.realTime ? new Date() : inspectionNoonUtc(this.zone.start.lon);
     const sun = bodyPosition(
       Astronomy.Body.Sun,
       date,
@@ -239,7 +264,6 @@ export class Game {
     this.sun.position.copy(this.camera.position).addScaledVector(sun.direction, 7000);
     this.sunTarget.position.copy(this.camera.position);
     this.sunTarget.position.y -= 800;
-
     this.fill.position.copy(this.camera.position).addScaledVector(sun.direction, -4000);
     this.fill.position.y += 2000;
 
@@ -253,7 +277,8 @@ export class Game {
   }
 
   private emitStatus(): void {
-    const geo = localToGeoUtm(this.camera.position.x, this.camera.position.z);
+    if (!this.controls) return;
+    const geo = localToGeoUtm(this.zone, this.camera.position.x, this.camera.position.z);
     const stats = this.adaptive.stats;
 
     this.onStatus({
@@ -268,7 +293,8 @@ export class Game {
       backend: (navigator as Navigator & { gpu?: unknown }).gpu ? 'WebGPU' : 'WebGL2',
       locked: this.controls.isLocked,
       flyMode: this.flyMode,
-      realTime: this.realTime
+      realTime: this.realTime,
+      waterBodies: this.region?.waterBodies.length ?? 0
     });
   }
 
@@ -278,6 +304,7 @@ export class Game {
     window.addEventListener('keyup', this.keyUp);
     this.controls.addEventListener('lock', this.emitStatusBound);
     this.controls.addEventListener('unlock', this.emitStatusBound);
+    this.eventsBound = true;
   }
 
   private readonly emitStatusBound = (): void => this.emitStatus();
@@ -305,29 +332,29 @@ export class Game {
   };
 
   stop(): void {
+    if (this.stopped) return;
     this.stopped = true;
     if (this.rebuildTimer) clearTimeout(this.rebuildTimer);
-    window.removeEventListener('resize', this.resize);
-    window.removeEventListener('keydown', this.keyDown);
-    window.removeEventListener('keyup', this.keyUp);
-    this.river.dispose();
+    if (this.eventsBound) {
+      window.removeEventListener('resize', this.resize);
+      window.removeEventListener('keydown', this.keyDown);
+      window.removeEventListener('keyup', this.keyUp);
+      this.controls?.removeEventListener('lock', this.emitStatusBound);
+      this.controls?.removeEventListener('unlock', this.emitStatusBound);
+    }
+    this.river?.dispose();
+    this.sea?.dispose(this.scene);
+    this.lakes?.dispose(this.scene);
     this.adaptive.dispose();
     this.renderer?.dispose();
     this.renderer?.domElement.remove();
   }
 }
 
-function inspectionNoonUtc(): Date {
+function inspectionNoonUtc(longitude: number): Date {
   const now = new Date();
-  return new Date(
-    Date.UTC(
-      now.getUTCFullYear(),
-      now.getUTCMonth(),
-      now.getUTCDate(),
-      19,
-      0,
-      0,
-      0
-    )
-  );
+  const utcHour = ((12 - longitude / 15) % 24 + 24) % 24;
+  const hour = Math.floor(utcHour);
+  const minute = Math.round((utcHour - hour) * 60);
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hour, minute));
 }
