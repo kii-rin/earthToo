@@ -13,16 +13,6 @@ export type TerrainZone = {
   spacingM: number;
   segments: number;
   palette: TerrainPalette;
-  heightOffsetM?: number;
-  coloradoRiver?: boolean;
-  seaLevelM?: number;
-  oceanFloorM?: number;
-  hydroLakes?: boolean;
-  syntheticWaterDepthM?: number;
-  waterShoreDepthM?: number;
-  waterTaperCells?: number;
-  waterRenderOffsetM?: number;
-  minWaterAreaKm2?: number;
   cameraAltitudeM?: number;
   cameraBackM?: number;
   cameraFarM?: number;
@@ -42,8 +32,7 @@ export const GRAND_CANYON: TerrainZone = {
   originN: 3_991_656.860017819,
   spacingM: 10,
   segments: 2048,
-  palette: 'canyon',
-  coloradoRiver: true
+  palette: 'canyon'
 };
 
 export const HAWAII_NORTH_SHORE: TerrainZone = {
@@ -56,10 +45,27 @@ export const HAWAII_NORTH_SHORE: TerrainZone = {
   originN: 2_393_460.2063752064,
   spacingM: 10,
   segments: 2048,
+  palette: 'island'
+};
+
+export const SAN_FRANCISCO_GOLDEN_GATE: TerrainZone = {
+  id: 'san-francisco-golden-gate',
+  label: 'San Francisco · Golden Gate',
+  start: { lat: 37.8199, lon: -122.4783 },
+  utmZone: 10,
+  epsg: 32610,
+  originE: 545_915.8162135034,
+  originN: 4_185_961.039087708,
+  spacingM: 10,
+  segments: 2048,
   palette: 'island',
-  heightOffsetM: -10,
-  seaLevelM: -10,
-  oceanFloorM: -30
+  cameraAltitudeM: 1100,
+  cameraBackM: 2600,
+  cameraFarM: 40_000,
+  fogDensity: 0.000065,
+  flySpeedMps: 140,
+  flyFastSpeedMps: 700,
+  flyVerticalSpeedMps: 180
 };
 
 export const WILSON_LAKE: TerrainZone = {
@@ -73,12 +79,6 @@ export const WILSON_LAKE: TerrainZone = {
   spacingM: 10,
   segments: 2048,
   palette: 'plains',
-  hydroLakes: true,
-  syntheticWaterDepthM: 20,
-  waterShoreDepthM: 10,
-  waterTaperCells: 2,
-  waterRenderOffsetM: 0.2,
-  minWaterAreaKm2: 0.008,
   cameraAltitudeM: 1800,
   cameraBackM: 3600,
   cameraFarM: 45_000,
@@ -88,7 +88,12 @@ export const WILSON_LAKE: TerrainZone = {
   flyVerticalSpeedMps: 220
 };
 
-export const TERRAIN_ZONES = [GRAND_CANYON, HAWAII_NORTH_SHORE, WILSON_LAKE] as const;
+export const TERRAIN_ZONES = [
+  GRAND_CANYON,
+  HAWAII_NORTH_SHORE,
+  SAN_FRANCISCO_GOLDEN_GATE,
+  WILSON_LAKE
+] as const;
 
 export function terrainZone(id: string | null | undefined): TerrainZone | null {
   return TERRAIN_ZONES.find((zone) => zone.id === id) ?? null;
