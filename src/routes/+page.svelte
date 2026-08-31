@@ -8,10 +8,9 @@
   let selectedZone: TerrainZone = TERRAIN_ZONES[0];
   let loading = true;
   let error = '';
-  let precision = 8;
   let loadToken = 0;
 
-  let status: GameStatus = emptyStatus(selectedZone, precision);
+  let status: GameStatus = emptyStatus(selectedZone);
 
   onMount(() => {
     const lockWorld = () => {
@@ -36,11 +35,11 @@
     selectedZone = zone;
     loading = true;
     error = '';
-    status = emptyStatus(zone, precision);
+    status = emptyStatus(zone);
 
     const instance = new Game(host, zone, (next) => {
       if (token === loadToken) status = next;
-    }, precision);
+    });
     game = instance;
 
     try {
@@ -50,7 +49,6 @@
         return;
       }
       loading = false;
-      precision = status.requestedError;
     } catch (cause) {
       if (token !== loadToken) return;
       console.error(cause);
@@ -64,11 +62,6 @@
     void loadZone(zone);
   }
 
-  function changePrecision(event: Event) {
-    precision = Number((event.currentTarget as HTMLInputElement).value);
-    game?.setTerrainError(precision);
-  }
-
   function openMaps() {
     window.open(
       `https://www.google.com/maps/search/?api=1&query=${status.lat.toFixed(6)},${status.lon.toFixed(6)}`,
@@ -77,7 +70,7 @@
     );
   }
 
-  function emptyStatus(zone: TerrainZone, requestedError: number): GameStatus {
+  function emptyStatus(zone: TerrainZone): GameStatus {
     return {
       fps: 0,
       lat: zone.start.lat,
@@ -86,12 +79,10 @@
       meshError: 0,
       rmsd: 0,
       buildMs: 0,
-      requestedError,
       backend: '…',
       locked: false,
       flyMode: true,
-      realTime: false,
-      waterBodies: 0
+      realTime: false
     };
   }
 </script>
@@ -131,21 +122,10 @@
       <small>{Math.round(status.triangles / 1000)}k tris</small>
     </div>
 
-    <label>
-      <div>
-        <span>Mesh max vertical error</span>
-        <b>± {precision.toFixed(1)} m</b>
-      </div>
-      <input
-        type="range"
-        min="0.5"
-        max="100"
-        step="0.5"
-        bind:value={precision}
-        on:input={changePrecision}
-      />
-      <div class="scale"><span>more geometry</span><span>less geometry</span></div>
-    </label>
+    <div class="fixed-error">
+      <span>Mesh max vertical error</span>
+      <b>± 8.0 m</b>
+    </div>
 
     <div class="detail">
       <span>actual error {status.meshError.toFixed(2)} m</span>
@@ -153,15 +133,6 @@
       <span>build {status.buildMs.toFixed(0)} ms</span>
       <span>source grid {selectedZone.spacingM} m</span>
       <span>area {(terrainSizeM(selectedZone) / 1000).toFixed(2)} × {(terrainSizeM(selectedZone) / 1000).toFixed(2)} km</span>
-      {#if selectedZone.seaLevelM !== undefined}
-        <span>sea plane {selectedZone.seaLevelM} m</span>
-      {/if}
-      {#if selectedZone.hydroLakes}
-        <span>3DHP lakes {status.waterBodies}</span>
-        <span>synthetic floor {selectedZone.syntheticWaterDepthM ?? 20} m deep</span>
-        <span>shore taper {selectedZone.waterTaperCells ?? 2} cells</span>
-        <span>water offset +{selectedZone.waterRenderOffsetM ?? 0.2} m</span>
-      {/if}
     </div>
 
     <div class="coords">
@@ -242,14 +213,17 @@
   .headline span { font-size: 8px; text-transform: uppercase; color: #ffffff7a; }
   .headline small { margin-left: auto; font-size: 8px; color: #ffffff86; }
 
-  label { display: block; margin-top: 10px; padding-top: 8px; border-top: 1px solid #ffffff13; }
-  label > div:first-child { display: flex; justify-content: space-between; font-size: 9px; }
-  label span { color: #ffffff8c; }
-  label b { font-weight: 600; }
-  input[type="range"] { width: 100%; margin: 8px 0 2px; accent-color: #d59055; }
-  .scale { display: flex; justify-content: space-between; font-size: 7px; color: #ffffff55; }
+  .fixed-error {
+    display: flex; justify-content: space-between; margin-top: 10px;
+    padding-top: 8px; border-top: 1px solid #ffffff13; font-size: 9px;
+  }
+  .fixed-error span { color: #ffffff8c; }
+  .fixed-error b { font-weight: 600; }
 
-  .detail { display: flex; flex-wrap: wrap; gap: 3px 8px; margin-top: 8px; font-size: 7px; color: #ffffff68; }
+  .detail {
+    display: flex; flex-wrap: wrap; gap: 3px 8px;
+    margin-top: 8px; font-size: 7px; color: #ffffff68;
+  }
   .coords {
     display: flex; align-items: center; gap: 6px; margin-top: 8px;
     padding-top: 7px; border-top: 1px solid #ffffff13;
@@ -288,7 +262,10 @@
     padding: 16px 20px; border-radius: 12px; background: #111e;
     border: 1px solid #ffffff1a; text-align: center; backdrop-filter: blur(12px);
   }
-  .gate small { display: block; margin-bottom: 6px; font-size: 8px; color: #ffffff6a; text-transform: uppercase; }
+  .gate small {
+    display: block; margin-bottom: 6px; font-size: 8px;
+    color: #ffffff6a; text-transform: uppercase;
+  }
   .gate strong { font-size: 14px; font-weight: 560; }
   .gate.error strong { color: #efb0a0; font-size: 11px; }
 </style>
