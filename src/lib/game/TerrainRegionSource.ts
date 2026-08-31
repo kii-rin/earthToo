@@ -5,20 +5,12 @@ import {
   type TerrainZone
 } from './zones';
 
-export type TerrainWaterBody = {
-  id: string;
-  name: string;
-  levelM: number;
-  rings: [number, number][][];
-};
-
 export type TerrainRegion = {
   side: number;
   segments: number;
   spacingM: number;
   sizeM: number;
   values: Float32Array;
-  waterBodies: TerrainWaterBody[];
 };
 
 export class TerrainRegionSource {
@@ -39,21 +31,17 @@ export class TerrainRegionSource {
     }
 
     const buffer = await response.arrayBuffer();
-    const terrainBytes = side * side * Int16Array.BYTES_PER_ELEMENT;
-    if (buffer.byteLength < terrainBytes) {
-      throw new Error(`Unexpected terrain payload: ${buffer.byteLength} bytes; expected at least ${terrainBytes}`);
+    const expectedBytes = side * side * Int16Array.BYTES_PER_ELEMENT;
+    if (buffer.byteLength !== expectedBytes) {
+      throw new Error(
+        `Unexpected terrain payload: ${buffer.byteLength} bytes; expected ${expectedBytes}`
+      );
     }
 
-    const view = new DataView(buffer, 0, terrainBytes);
+    const view = new DataView(buffer);
     const values = new Float32Array(side * side);
     for (let i = 0; i < values.length; i++) {
       values[i] = view.getInt16(i * 2, true) * TERRAIN_HEIGHT_UNIT_M;
-    }
-
-    let waterBodies: TerrainWaterBody[] = [];
-    if (buffer.byteLength > terrainBytes) {
-      const json = new TextDecoder().decode(new Uint8Array(buffer, terrainBytes));
-      if (json) waterBodies = JSON.parse(json) as TerrainWaterBody[];
     }
 
     this.loaded = {
@@ -61,8 +49,7 @@ export class TerrainRegionSource {
       segments: this.zone.segments,
       spacingM: this.zone.spacingM,
       sizeM: terrainSizeM(this.zone),
-      values,
-      waterBodies
+      values
     };
     return this.loaded;
   }
