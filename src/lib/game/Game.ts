@@ -5,9 +5,6 @@ import { bodyPosition } from './celestial';
 import { localToGeoUtm } from './utm';
 import { TerrainRegionSource, type TerrainRegion } from './TerrainRegionSource';
 import { AdaptiveTerrain } from './AdaptiveTerrain';
-import { ColoradoRiver } from './ColoradoRiver';
-import { Sea } from './Sea';
-import { Lakes } from './Lakes';
 import type { TerrainZone } from './zones';
 
 export type GameStatus = {
@@ -18,14 +15,13 @@ export type GameStatus = {
   meshError: number;
   rmsd: number;
   buildMs: number;
-  requestedError: number;
   backend: string;
   locked: boolean;
   flyMode: boolean;
   realTime: boolean;
-  waterBodies: number;
 };
 
+const TERRAIN_ERROR_M = 8;
 const EYE_HEIGHT = 1.72;
 const WALK_SPEED = 8;
 const FAST_SPEED = 85;
@@ -40,9 +36,6 @@ export class Game {
   private controls!: PointerLockControls;
   private readonly source: TerrainRegionSource;
   private readonly adaptive: AdaptiveTerrain;
-  private river: ColoradoRiver | null = null;
-  private sea: Sea | null = null;
-  private lakes: Lakes | null = null;
   private region: TerrainRegion | null = null;
   private readonly keys = new Set<string>();
   private readonly clock = new THREE.Clock();
@@ -50,8 +43,6 @@ export class Game {
   private eventsBound = false;
   private flyMode = true;
   private realTime = false;
-  private requestedError: number;
-  private rebuildTimer: ReturnType<typeof setTimeout> | null = null;
   private fpsFrames = 0;
   private fpsWindow = 0;
   private fps = 0;
@@ -64,10 +55,8 @@ export class Game {
   constructor(
     private readonly host: HTMLElement,
     readonly zone: TerrainZone,
-    private readonly onStatus: (status: GameStatus) => void,
-    initialError = 8
+    private readonly onStatus: (status: GameStatus) => void
   ) {
-    this.requestedError = THREE.MathUtils.clamp(initialError, 0.5, 100);
     this.camera.far = zone.cameraFarM ?? 30_000;
     this.camera.updateProjectionMatrix();
     this.source = new TerrainRegionSource(zone);
@@ -102,30 +91,13 @@ export class Game {
     this.region = await this.source.load();
     if (this.stopped) return;
 
-    this.adaptive.rebuild(this.region, this.requestedError);
-    if (this.region.waterBodies.length > 0) {
-      this.lakes = new Lakes(this.scene, this.region.waterBodies, this.zone.waterRenderOffsetM ?? 0.2);
-    }
+    this.adaptive.rebuild(this.region, TERRAIN_ERROR_M);
 
-    if (this.zone.coloradoRiver) {
-      this.river = new ColoradoRiver(
-        this.scene,
-        (x, z) => this.adaptive.sampleRenderedHeight(x, z)
-      );
-      void this.river.load(this.requestedError).catch((error) => {
-        console.warn('Colorado River unavailable:', error);
-      });
-    }
-
-    if (this.zone.seaLevelM !== undefined) {
-      this.sea = new Sea(this.scene, this.region.sizeM, this.zone.seaLevelM);
-    }
-
-    const ground = this.source.sampleLocal(0, 0) ?? this.zone.seaLevelM ?? 0;
+    const ground = this.source.sampleLocal(0, 0) ?? 0;
     const altitude = this.zone.cameraAltitudeM ?? 900;
     const back = this.zone.cameraBackM ?? 1800;
     this.camera.position.set(0, ground + altitude, back);
-    this.camera.lookAt(0, this.zone.seaLevelM ?? ground, 0);
+    this.camera.lookAt(0, ground, 0);
 
     this.updateSky();
     this.clock.start();
@@ -134,19 +106,6 @@ export class Game {
 
   lock(): void {
     if (this.controls) this.controls.lock();
-  }
-
-  setTerrainError(errorM: number): void {
-    this.requestedError = THREE.MathUtils.clamp(errorM, 0.5, 100);
-    if (!this.region) return;
-
-    if (this.rebuildTimer) clearTimeout(this.rebuildTimer);
-    this.rebuildTimer = setTimeout(() => {
-      if (!this.region || this.stopped) return;
-      this.adaptive.rebuild(this.region, this.requestedError);
-      this.river?.rebuild(this.requestedError);
-      this.emitStatus();
-    }, 120);
   }
 
   toggleFlyMode(): void {
@@ -177,12 +136,12 @@ export class Game {
     if (this.controls.isLocked) this.move(dt);
 
     if (!this.flyMode) {
-      const renderedGround = this.adaptive.sampleRenderedHeight(
-        this.camera.position.x,
-        this.camera.position.z
-      );
-      const fallbackGround = this.source.sampleLocal(this.camera.position.x, this.camera.position.z);
+      const x = this.camera.position.x;
+      const z = this.camera.position.z;
+      const renderedGround = this.adaptive.sampleRenderedHeight(x, z);
+      const fallbackGround = this.source.sampleLocal(x, z);
       const ground = renderedGround ?? fallbackGround;
+
       if (ground !== null) {
         const target = ground + EYE_HEIGHT + 0.22;
         if (target > this.camera.position.y) {
@@ -289,12 +248,10 @@ export class Game {
       meshError: stats.maxError,
       rmsd: stats.rmsd,
       buildMs: stats.buildMs,
-      requestedError: this.requestedError,
       backend: (navigator as Navigator & { gpu?: unknown }).gpu ? 'WebGPU' : 'WebGL2',
       locked: this.controls.isLocked,
       flyMode: this.flyMode,
-      realTime: this.realTime,
-      waterBodies: this.region?.waterBodies.length ?? 0
+      realTime: this.realTime
     });
   }
 
@@ -324,9 +281,9 @@ export class Game {
 
   private readonly resize = (): void => {
     if (!this.renderer) return;
-    const width = this.host.clientWidth;
-    const height = this.host.clientHeight;
-    this.camera.aspect = Math.max(1, width) / Math.max(1, height);
+    const width = Math.max(1, this.host.clientWidth);
+    const height = Math.max(1, this.host.clientHeight);
+    this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);
   };
@@ -334,7 +291,6 @@ export class Game {
   stop(): void {
     if (this.stopped) return;
     this.stopped = true;
-    if (this.rebuildTimer) clearTimeout(this.rebuildTimer);
     if (this.eventsBound) {
       window.removeEventListener('resize', this.resize);
       window.removeEventListener('keydown', this.keyDown);
@@ -342,9 +298,6 @@ export class Game {
       this.controls?.removeEventListener('lock', this.emitStatusBound);
       this.controls?.removeEventListener('unlock', this.emitStatusBound);
     }
-    this.river?.dispose();
-    this.sea?.dispose(this.scene);
-    this.lakes?.dispose(this.scene);
     this.adaptive.dispose();
     this.renderer?.dispose();
     this.renderer?.domElement.remove();
