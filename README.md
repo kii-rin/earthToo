@@ -1,35 +1,19 @@
-# earthToo v0.2 — smooth shoreline mask
+# earthToo v0.2 — water fixed
 
-Base:
-the ocean-only cleanup build that removed almost all major shoreline problems.
+This branch now contains the current working water checkpoint as a snapshot archive at:
 
-The remaining sharp square / stair-step coastline was caused by the binary water
-mask being sampled with THREE.NearestFilter.
+`snapshots/earthToo-water-fixed-v0.2.zip`
 
-This revision changes ONLY the GPU mask texture sampling:
-
-NearestFilter
-→ LinearFilter
-
-Why it helps:
-
-The 3DHP polygons are vector geometry, but after rasterization the mask contains
-square pixels. Nearest-neighbor filtering makes the shader cutoff follow those
-pixel squares exactly.
-
-Linear filtering interpolates between neighboring 0/1 mask texels. The existing
-0.5 discard threshold therefore follows a much smoother contour between pixels
-instead of a blocky staircase.
-
-Unchanged:
-- ocean-only featuretype 4 filtering
-- detached-water cleanup
-- small isolated land-hole cleanup
-- 60 m water underlap
-- water depth bias
-- USGS 3DEP
-- 2049 × 2049 / 10 m terrain
+Current working setup:
+- USGS 3DEP raw Float32 terrain
+- fixed 2049 × 2049 / 10 m grid
 - Delatin maxError = 8 m
-- 3DHP query
+- ocean-only 3DHP water mask (`featuretype = 4`)
+- detached-water cleanup
+- isolated land-hole cleanup
+- ~60 m water underlap beneath land
+- water depth bias to reduce shoreline flicker
+- LinearFilter on the raster water mask for smoother edges
 - no distance LOD
-- no npm/build checks
+
+This is still an experimental checkpoint, but it is the best working water build so far.
