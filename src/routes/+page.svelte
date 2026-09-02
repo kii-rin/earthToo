@@ -1,294 +1,608 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Game, type GameStatus } from '$lib/game/Game';
-  import { TERRAIN_ZONES, terrainSizeM, terrainSourceLabel, type TerrainZone } from '$lib/game/zones';
+  import * as THREE from 'three';
+  import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+  import Delatin from 'delatin';
+
+  // Everything terrain-related is fixed.
+  // No distance LOD, no camera-dependent rebuild.
+  const SPACING_M = 10;
+  const SEGMENTS = 2048;
+  const SIDE = SEGMENTS + 1;
+  const SIZE_M = SEGMENTS * SPACING_M;
+
+  const MAX_ERROR_M = 8;
+  const WATER_LEVEL_M = 0.05;
 
   let host: HTMLDivElement;
-  let game: Game | null = null;
-  let selectedZone: TerrainZone = TERRAIN_ZONES[0];
-  let loading = true;
-  let error = '';
-  let precision = 8;
-  let loadToken = 0;
+  let message = 'loading raw 3DEP + 3DHP shoreline polygons…';
+  let triangles = 0;
+  let vertices = 0;
+  let buildMs = 0;
+  let minHeight = 0;
+  let maxHeight = 0;
+  let waterPixels = 0;
+  let waterFeatures = 0;
+  let fps = 0;
 
-  let status: GameStatus = emptyStatus(selectedZone, precision);
+  type ArcFeature = {
+    attributes?: {
+      featuretype?: number;
+      featuretypelabel?: string;
+    };
+    geometry?: {
+      rings?: number[][][];
+    };
+  };
+
+  type WaterPayload = {
+    epsg: number;
+    minE: number;
+    minN: number;
+    maxE: number;
+    maxN: number;
+    exceededTransferLimit: boolean;
+    features: ArcFeature[];
+  };
 
   onMount(() => {
-    const lockWorld = () => {
-      if (!status.locked && !loading && !error) game?.lock();
+    let disposed = false;
+    let frame = 0;
+
+    let renderer: THREE.WebGLRenderer | null = null;
+    let terrainGeometry: THREE.BufferGeometry | null = null;
+    let terrainMaterial: THREE.MeshStandardMaterial | null = null;
+    let waterGeometry: THREE.PlaneGeometry | null = null;
+    let waterMaterial: THREE.MeshStandardMaterial | null = null;
+    let waterTexture: THREE.DataTexture | null = null;
+    let controls: OrbitControls | null = null;
+
+    const start = async () => {
+      const [terrainResponse, waterResponse] = await Promise.all([
+        fetch('/api/terrain-3dhp-test', { cache: 'no-store' }),
+        fetch('/api/water-3dhp-test', { cache: 'no-store' })
+      ]);
+
+      if (!terrainResponse.ok) {
+        throw new Error(await terrainResponse.text());
+      }
+
+      if (!waterResponse.ok) {
+        throw new Error(await waterResponse.text());
+      }
+
+      const terrainBuffer = await terrainResponse.arrayBuffer();
+      const heights = new Float32Array(terrainBuffer);
+
+      if (heights.length !== SIDE * SIDE) {
+        throw new Error(
+          `Expected ${SIDE * SIDE} 3DEP heights, got ${heights.length}`
+        );
+      }
+
+      const hydro = (await waterResponse.json()) as WaterPayload;
+
+      if (hydro.exceededTransferLimit) {
+        throw new Error(
+          '3DHP water query exceeded its transfer limit; shoreline payload is incomplete'
+        );
+      }
+
+      minHeight = Infinity;
+      maxHeight = -Infinity;
+
+      for (let i = 0; i < heights.length; i++) {
+        const h = heights[i];
+        if (h < minHeight) minHeight = h;
+        if (h > maxHeight) maxHeight = h;
+      }
+
+      // Rasterize official vector water polygons to a GPU mask.
+      // Delatin is NOT involved in this operation.
+      const waterMask = rasterizeWater(
+        hydro.features,
+        hydro.minE,
+        hydro.minN,
+        hydro.maxE,
+        hydro.maxN,
+        SIDE
+      );
+
+      waterFeatures = hydro.features.length;
+      waterPixels = 0;
+
+      for (let i = 0; i < waterMask.length; i++) {
+        if (waterMask[i] > 127) waterPixels++;
+      }
+
+      waterTexture = new THREE.DataTexture(
+        waterMask,
+        SIDE,
+        SIDE,
+        THREE.RedFormat,
+        THREE.UnsignedByteType
+      );
+      waterTexture.minFilter = THREE.NearestFilter;
+      waterTexture.magFilter = THREE.NearestFilter;
+      waterTexture.generateMipmaps = false;
+      waterTexture.unpackAlignment = 1;
+      waterTexture.needsUpdate = true;
+
+      message = 'Delatin triangulating fixed 8 m mesh…';
+      await new Promise(requestAnimationFrame);
+
+      const buildStart = performance.now();
+
+      // Pure Delatin. Same static mesh as before.
+      const tin = new Delatin(heights, SIDE, SIDE);
+      tin.run(MAX_ERROR_M);
+
+      const coords = tin.coords;
+      const tris = tin.triangles;
+
+      const positions = new Float32Array(tris.length * 3);
+      const half = SIZE_M / 2;
+
+      let out = 0;
+
+      for (let i = 0; i < tris.length; i++) {
+        const vertexIndex = tris[i];
+        const px = coords[vertexIndex * 2];
+        const py = coords[vertexIndex * 2 + 1];
+
+        positions[out++] = px * SPACING_M - half;
+        positions[out++] = tin.heightAt(px, py);
+        positions[out++] = py * SPACING_M - half;
+      }
+
+      buildMs = performance.now() - buildStart;
+      triangles = tris.length / 3;
+      vertices = coords.length / 2;
+
+      terrainGeometry = new THREE.BufferGeometry();
+      terrainGeometry.setAttribute(
+        'position',
+        new THREE.BufferAttribute(positions, 3)
+      );
+      terrainGeometry.computeVertexNormals();
+      terrainGeometry.computeBoundingSphere();
+
+      terrainMaterial = new THREE.MeshStandardMaterial({
+        color: 0x7f9652,
+        roughness: 1,
+        metalness: 0,
+        flatShading: true
+      });
+
+      // Same mask clips the terrain and water in opposite directions.
+      // A pixel is therefore either terrain OR water, never both.
+      applyWaterMask(
+        terrainMaterial,
+        waterTexture,
+        SIZE_M,
+        false
+      );
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xb7c8ce);
+
+      const terrain = new THREE.Mesh(
+        terrainGeometry,
+        terrainMaterial
+      );
+      scene.add(terrain);
+
+      waterGeometry = new THREE.PlaneGeometry(
+        SIZE_M,
+        SIZE_M,
+        1,
+        1
+      );
+
+      waterMaterial = new THREE.MeshStandardMaterial({
+        color: 0x287f9c,
+        roughness: 0.28,
+        metalness: 0,
+        side: THREE.DoubleSide
+      });
+
+      applyWaterMask(
+        waterMaterial,
+        waterTexture,
+        SIZE_M,
+        true
+      );
+
+      const water = new THREE.Mesh(
+        waterGeometry,
+        waterMaterial
+      );
+      water.rotation.x = -Math.PI / 2;
+      water.position.y = WATER_LEVEL_M;
+      scene.add(water);
+
+      scene.add(
+        new THREE.HemisphereLight(
+          0xdbe8ef,
+          0x5b513d,
+          2.2
+        )
+      );
+
+      const sun = new THREE.DirectionalLight(
+        0xfff2d0,
+        2.5
+      );
+      sun.position.set(-5000, 7000, 4000);
+      scene.add(sun);
+
+      const camera = new THREE.PerspectiveCamera(
+        55,
+        1,
+        1,
+        60_000
+      );
+      camera.position.set(0, 4200, 6500);
+
+      renderer = new THREE.WebGLRenderer({
+        antialias: true
+      });
+      renderer.setPixelRatio(
+        Math.min(window.devicePixelRatio || 1, 1.5)
+      );
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      host.appendChild(renderer.domElement);
+
+      controls = new OrbitControls(
+        camera,
+        renderer.domElement
+      );
+      controls.target.set(0, 150, 0);
+      controls.enableDamping = true;
+      controls.maxDistance = 30_000;
+      controls.update();
+
+      const resize = () => {
+        if (!renderer) return;
+
+        const width = host.clientWidth;
+        const height = host.clientHeight;
+
+        camera.aspect =
+          width / Math.max(1, height);
+        camera.updateProjectionMatrix();
+
+        renderer.setSize(width, height, false);
+      };
+
+      resize();
+      window.addEventListener('resize', resize);
+
+      message =
+        '3DEP → fixed Delatin + official 3DHP water polygons';
+
+      let fpsFrames = 0;
+      let fpsStart = performance.now();
+
+      const draw = () => {
+        if (
+          disposed ||
+          !renderer ||
+          !controls
+        ) {
+          return;
+        }
+
+        controls.update();
+        renderer.render(scene, camera);
+
+        fpsFrames++;
+
+        const now = performance.now();
+
+        if (now - fpsStart >= 500) {
+          fps =
+            (fpsFrames * 1000) /
+            (now - fpsStart);
+          fpsFrames = 0;
+          fpsStart = now;
+        }
+
+        frame = requestAnimationFrame(draw);
+      };
+
+      draw();
+
+      return () =>
+        window.removeEventListener(
+          'resize',
+          resize
+        );
     };
 
-    host.addEventListener('click', lockWorld);
-    void loadZone(selectedZone);
+    let removeResize:
+      | (() => void)
+      | undefined;
+
+    start()
+      .then((cleanup) => {
+        removeResize = cleanup;
+      })
+      .catch((error) => {
+        console.error(error);
+        message = String(error);
+      });
 
     return () => {
-      loadToken++;
-      host.removeEventListener('click', lockWorld);
-      game?.stop();
+      disposed = true;
+      cancelAnimationFrame(frame);
+      removeResize?.();
+
+      controls?.dispose();
+
+      terrainGeometry?.dispose();
+      terrainMaterial?.dispose();
+
+      waterGeometry?.dispose();
+      waterMaterial?.dispose();
+      waterTexture?.dispose();
+
+      renderer?.dispose();
+      renderer?.domElement.remove();
     };
   });
 
-  async function loadZone(zone: TerrainZone) {
-    const token = ++loadToken;
-    game?.stop();
-    game = null;
-    host.replaceChildren();
-    selectedZone = zone;
-    loading = true;
-    error = '';
-    status = emptyStatus(zone, precision);
+  function rasterizeWater(
+    features: ArcFeature[],
+    minE: number,
+    minN: number,
+    maxE: number,
+    maxN: number,
+    size: number
+  ): Uint8Array {
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
 
-    const instance = new Game(host, zone, (next) => {
-      if (token === loadToken) status = next;
-    }, precision);
-    game = instance;
+    const ctx = canvas.getContext('2d', {
+      willReadFrequently: true
+    });
 
-    try {
-      await instance.start();
-      if (token !== loadToken) {
-        instance.stop();
-        return;
-      }
-      loading = false;
-      precision = status.requestedError;
-    } catch (cause) {
-      if (token !== loadToken) return;
-      console.error(cause);
-      error = cause instanceof Error ? cause.message : String(cause);
-      loading = false;
+    if (!ctx) {
+      throw new Error('Could not create water-mask canvas');
     }
+
+    ctx.clearRect(0, 0, size, size);
+    ctx.fillStyle = '#ffffff';
+
+    const spanE = maxE - minE;
+    const spanN = maxN - minN;
+
+    for (const feature of features) {
+      const rings = feature.geometry?.rings;
+      if (!rings?.length) continue;
+
+      const path = new Path2D();
+
+      for (const ring of rings) {
+        if (ring.length < 3) continue;
+
+        for (let i = 0; i < ring.length; i++) {
+          const [e, n] = ring[i];
+
+          const x =
+            ((e - minE) / spanE) *
+            (size - 1);
+
+          // Raster row zero / terrain row zero are north.
+          const y =
+            ((maxN - n) / spanN) *
+            (size - 1);
+
+          if (i === 0) {
+            path.moveTo(x, y);
+          } else {
+            path.lineTo(x, y);
+          }
+        }
+
+        path.closePath();
+      }
+
+      // ArcGIS rings can contain holes.
+      ctx.fill(path, 'evenodd');
+    }
+
+    const rgba = ctx.getImageData(
+      0,
+      0,
+      size,
+      size
+    ).data;
+
+    const mask = new Uint8Array(size * size);
+
+    for (let i = 0; i < mask.length; i++) {
+      mask[i] = rgba[i * 4 + 3] > 127
+        ? 255
+        : 0;
+    }
+
+    return mask;
   }
 
-  function selectZone(zone: TerrainZone) {
-    if (zone.id === selectedZone.id || loading) return;
-    void loadZone(zone);
-  }
+  function applyWaterMask(
+    material: THREE.MeshStandardMaterial,
+    texture: THREE.DataTexture,
+    terrainSizeM: number,
+    drawWater: boolean
+  ) {
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.uWaterMask = {
+        value: texture
+      };
 
-  function changePrecision(event: Event) {
-    precision = Number((event.currentTarget as HTMLInputElement).value);
-    game?.setTerrainError(precision);
-  }
+      shader.uniforms.uTerrainSize = {
+        value: terrainSizeM
+      };
 
-  function openMaps() {
-    window.open(
-      `https://www.google.com/maps/search/?api=1&query=${status.lat.toFixed(6)},${status.lon.toFixed(6)}`,
-      '_blank',
-      'noopener,noreferrer'
-    );
-  }
+      shader.vertexShader =
+        shader.vertexShader.replace(
+          '#include <common>',
+          `
+#include <common>
+varying vec3 vWaterMaskWorldPosition;
+          `
+        );
 
-  function emptyStatus(zone: TerrainZone, requestedError: number): GameStatus {
-    return {
-      fps: 0,
-      lat: zone.start.lat,
-      lon: zone.start.lon,
-      triangles: 0,
-      meshError: 0,
-      rmsd: 0,
-      buildMs: 0,
-      requestedError,
-      backend: '…',
-      locked: false,
-      flyMode: true,
-      realTime: false,
-      waterBodies: 0
+      shader.vertexShader =
+        shader.vertexShader.replace(
+          '#include <begin_vertex>',
+          `
+#include <begin_vertex>
+vWaterMaskWorldPosition =
+  (modelMatrix * vec4(transformed, 1.0)).xyz;
+          `
+        );
+
+      shader.fragmentShader =
+        shader.fragmentShader.replace(
+          '#include <common>',
+          `
+#include <common>
+uniform sampler2D uWaterMask;
+uniform float uTerrainSize;
+varying vec3 vWaterMaskWorldPosition;
+          `
+        );
+
+      const test = drawWater
+        ? 'if (waterMaskValue < 0.5) discard;'
+        : 'if (waterMaskValue >= 0.5) discard;';
+
+      shader.fragmentShader =
+        shader.fragmentShader.replace(
+          '#include <clipping_planes_fragment>',
+          `
+#include <clipping_planes_fragment>
+
+vec2 waterMaskUv =
+  (vWaterMaskWorldPosition.xz +
+    vec2(uTerrainSize * 0.5)) /
+  uTerrainSize;
+
+if (
+  waterMaskUv.x < 0.0 ||
+  waterMaskUv.x > 1.0 ||
+  waterMaskUv.y < 0.0 ||
+  waterMaskUv.y > 1.0
+) {
+  discard;
+}
+
+float waterMaskValue =
+  texture2D(
+    uWaterMask,
+    waterMaskUv
+  ).r;
+
+${test}
+          `
+        );
     };
+
+    material.customProgramCacheKey = () =>
+      drawWater
+        ? '3dhp-water-mask-water-v1'
+        : '3dhp-water-mask-terrain-v1';
   }
 </script>
 
 <svelte:head>
-  <title>earthToo</title>
+  <title>3DEP → Delatin + 3DHP shoreline</title>
 </svelte:head>
 
-<div class="shell">
-  <div class="world" bind:this={host}></div>
-  <div class="crosshair" class:hidden={!status.locked}></div>
+<div class="viewer" bind:this={host}></div>
 
-  <header class="brand">
-    <strong>earthToo</strong>
-    <span>{terrainSourceLabel()} · {selectedZone.spacingM} m grid</span>
-  </header>
+<div class="hud">
+  <strong>{message}</strong>
 
-  <nav class="zones" aria-label="Terrain zone">
-    {#each TERRAIN_ZONES as zone}
-      <button
-        class:active={zone.id === selectedZone.id}
-        disabled={loading && zone.id !== selectedZone.id}
-        on:click={() => selectZone(zone)}
-      >
-        {zone.label}
-      </button>
-    {/each}
-  </nav>
+  <span>
+    USGS 3DEP · San Francisco · fixed {SPACING_M} m source
+  </span>
 
-  <div class="backend">{status.backend}</div>
+  <span>
+    Delatin max error: {MAX_ERROR_M} m · static mesh · NO distance LOD
+  </span>
 
-  <aside class="panel">
-    <div class="zone-name">{selectedZone.label}</div>
+  <span>
+    3DHP vector water: {waterFeatures} features · mask water {(
+      (waterPixels / (SIDE * SIDE)) *
+      100
+    ).toFixed(1)}%
+  </span>
 
-    <div class="headline">
-      <strong>{status.fps.toFixed(0)}</strong><span>fps</span>
-      <small>{Math.round(status.triangles / 1000)}k tris</small>
-    </div>
+  <span>
+    {fps.toFixed(0)} fps ·
+    {Math.round(triangles / 1000)}k triangles ·
+    {Math.round(vertices / 1000)}k Delatin vertices
+  </span>
 
-    <label>
-      <div>
-        <span>Mesh max vertical error</span>
-        <b>± {precision.toFixed(1)} m</b>
-      </div>
-      <input
-        type="range"
-        min="0.5"
-        max="100"
-        step="0.5"
-        bind:value={precision}
-        on:input={changePrecision}
-      />
-      <div class="scale"><span>more geometry</span><span>less geometry</span></div>
-    </label>
-
-    <div class="detail">
-      <span>actual error {status.meshError.toFixed(2)} m</span>
-      <span>RMS {status.rmsd.toFixed(2)} m</span>
-      <span>build {status.buildMs.toFixed(0)} ms</span>
-      <span>source grid {selectedZone.spacingM} m</span>
-      <span>area {(terrainSizeM(selectedZone) / 1000).toFixed(2)} × {(terrainSizeM(selectedZone) / 1000).toFixed(2)} km</span>
-      {#if selectedZone.seaLevelM !== undefined}
-        <span>sea plane {selectedZone.seaLevelM} m</span>
-      {/if}
-      {#if selectedZone.hydroLakes}
-        <span>3DHP lakes {status.waterBodies}</span>
-        <span>synthetic floor {selectedZone.syntheticWaterDepthM ?? 20} m deep</span>
-        <span>shore taper {selectedZone.waterTaperCells ?? 2} cells</span>
-        <span>water offset +{selectedZone.waterRenderOffsetM ?? 0.2} m</span>
-      {/if}
-    </div>
-
-    <div class="coords">
-      {status.lat.toFixed(5)}°, {status.lon.toFixed(5)}°
-      <button on:click={openMaps}>Maps ↗</button>
-    </div>
-  </aside>
-
-  <div class="controls">
-    <span><kbd>WASD</kbd></span>
-    <span><kbd>⇧</kbd> fast</span>
-    <button class:active={status.flyMode} on:click={() => game?.toggleFlyMode()}>
-      <kbd>F</kbd> fly
-    </button>
-    {#if status.flyMode}<span><kbd>Space/Ctrl</kbd></span>{/if}
-    <button on:click={() => game?.toggleTimeMode()}>
-      <kbd>T</kbd> {status.realTime ? 'real sky' : 'noon'}
-    </button>
-  </div>
-
-  {#if loading}
-    <div class="gate">
-      <div><small>{selectedZone.label}</small><strong>Building adaptive terrain…</strong></div>
-    </div>
-  {:else if error}
-    <div class="gate error">
-      <div><small>Terrain error</small><strong>{error}</strong></div>
-    </div>
-  {/if}
+  <span>
+    height: {minHeight.toFixed(1)} to
+    {maxHeight.toFixed(1)} m · build
+    {buildMs.toFixed(0)} ms
+  </span>
 </div>
 
 <style>
-  :global(*) { box-sizing: border-box; }
-  :global(html, body) { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #111; }
-  :global(body) { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #f6f4ee; }
-  :global(.game-canvas) { display: block; width: 100%; height: 100%; }
-
-  .shell, .world { position: fixed; inset: 0; }
-  .world { background: #111; }
-
-  .brand {
-    position: fixed; z-index: 20; top: 16px; left: 20px;
-    pointer-events: none; text-shadow: 0 1px 10px #0008;
-  }
-  .brand strong { display: block; font-size: 11px; letter-spacing: .17em; }
-  .brand span { display: block; margin-top: 2px; font-size: 9px; color: #ffffff9c; }
-
-  .zones {
-    position: fixed; z-index: 28; top: 14px; left: 50%;
-    transform: translateX(-50%); display: flex; gap: 6px;
-    padding: 4px; border: 1px solid #ffffff18; border-radius: 10px;
-    background: #111c; backdrop-filter: blur(10px);
-  }
-  .zones button {
-    border: 0; border-radius: 7px; padding: 6px 9px;
-    background: transparent; color: #ffffff89; font: inherit; font-size: 9px; cursor: pointer;
-  }
-  .zones button.active { background: #ffffff18; color: #fff; }
-  .zones button:disabled { cursor: default; opacity: .55; }
-
-  .backend {
-    position: fixed; z-index: 20; top: 15px; right: 16px;
-    padding: 5px 8px; border-radius: 999px;
-    background: #111a; border: 1px solid #ffffff1c;
-    backdrop-filter: blur(9px); font-size: 8px; color: #ffffffaa;
+  :global(*) {
+    box-sizing: border-box;
   }
 
-  .panel {
-    position: fixed; z-index: 24; top: 48px; left: 16px; width: 196px;
-    padding: 10px; border-radius: 10px;
-    background: #111c; border: 1px solid #ffffff16;
-    backdrop-filter: blur(11px); box-shadow: 0 8px 26px #0003;
+  :global(html, body) {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
   }
 
-  .zone-name { margin-bottom: 8px; font-size: 8px; color: #ffffff78; }
-  .headline { display: flex; align-items: baseline; gap: 4px; }
-  .headline strong { font-size: 23px; line-height: 1; letter-spacing: -.04em; }
-  .headline span { font-size: 8px; text-transform: uppercase; color: #ffffff7a; }
-  .headline small { margin-left: auto; font-size: 8px; color: #ffffff86; }
-
-  label { display: block; margin-top: 10px; padding-top: 8px; border-top: 1px solid #ffffff13; }
-  label > div:first-child { display: flex; justify-content: space-between; font-size: 9px; }
-  label span { color: #ffffff8c; }
-  label b { font-weight: 600; }
-  input[type="range"] { width: 100%; margin: 8px 0 2px; accent-color: #d59055; }
-  .scale { display: flex; justify-content: space-between; font-size: 7px; color: #ffffff55; }
-
-  .detail { display: flex; flex-wrap: wrap; gap: 3px 8px; margin-top: 8px; font-size: 7px; color: #ffffff68; }
-  .coords {
-    display: flex; align-items: center; gap: 6px; margin-top: 8px;
-    padding-top: 7px; border-top: 1px solid #ffffff13;
-    font-size: 8px; color: #ffffff76;
-  }
-  .coords button {
-    margin-left: auto; border: 1px solid #ffffff1b; border-radius: 6px;
-    background: #ffffff08; color: #ffffffc5; padding: 4px 6px; font: inherit; cursor: pointer;
+  :global(body) {
+    font-family: system-ui, sans-serif;
+    background: #111;
   }
 
-  .controls {
-    position: fixed; z-index: 24; bottom: 12px; left: 50%;
-    transform: translateX(-50%); display: flex; gap: 5px; align-items: center;
+  .viewer {
+    position: fixed;
+    inset: 0;
   }
-  .controls span, .controls button {
-    padding: 5px 7px; border: 1px solid #ffffff15; border-radius: 8px;
-    background: #111b; color: #ffffffae; backdrop-filter: blur(8px);
-    font-size: 8px; white-space: nowrap;
-  }
-  .controls button { font: inherit; cursor: pointer; }
-  .controls button.active { background: #ffffff17; color: #fff; }
-  kbd { font-family: inherit; font-weight: 700; color: #fff; }
 
-  .crosshair {
-    position: fixed; z-index: 12; top: 50%; left: 50%;
-    width: 5px; height: 5px; margin: -2.5px;
-    border: 1px solid #fff9; border-radius: 50%; pointer-events: none;
+  .viewer :global(canvas) {
+    display: block;
+    width: 100%;
+    height: 100%;
   }
-  .crosshair.hidden { display: none; }
 
-  .gate {
-    position: fixed; z-index: 50; inset: 0; display: grid; place-items: center;
-    background: #08080842;
+  .hud {
+    position: fixed;
+    z-index: 10;
+    top: 16px;
+    left: 16px;
+    display: grid;
+    gap: 4px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    background: #111c;
+    color: white;
+    font-size: 12px;
+    pointer-events: none;
   }
-  .gate > div {
-    padding: 16px 20px; border-radius: 12px; background: #111e;
-    border: 1px solid #ffffff1a; text-align: center; backdrop-filter: blur(12px);
+
+  .hud strong {
+    font-size: 13px;
   }
-  .gate small { display: block; margin-bottom: 6px; font-size: 8px; color: #ffffff6a; text-transform: uppercase; }
-  .gate strong { font-size: 14px; font-weight: 560; }
-  .gate.error strong { color: #efb0a0; font-size: 11px; }
+
+  .hud span {
+    color: #ffffffaa;
+  }
 </style>
