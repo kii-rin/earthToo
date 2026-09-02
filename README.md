@@ -1,20 +1,14 @@
-# earthToo v0.2 — water fixed
+# earthToo
 
-This branch contains the current working water checkpoint.
+Goal: build a fast, scalable 3D Earth renderer that can grow from local zones to continents and eventually the world, using real elevation/hydro data and shared global systems instead of regional hacks.
 
-Source snapshot:
-`snapshots/earthToo-water-fixed-v0.2.zip`
+Current base:
+- USGS 3DEP + Delatin terrain
+- global elevation coloring
+- movement + rendered-terrain collision
+- global ocean / river water modes
+- terrain-fitted river rendering
 
-Current setup:
-- USGS 3DEP raw Float32 terrain
-- fixed 2049 × 2049 / 10 m grid
-- Delatin maxError = 8 m
-- ocean-only 3DHP mask (`featuretype = 4`)
-- detached-water cleanup
-- isolated land-hole cleanup
-- ~60 m water underlap beneath land
-- water depth bias to reduce shoreline flicker
-- LinearFilter on the raster water mask for smoother edges
-- no distance LOD
+Exact v0.4 source snapshot: `snapshots/earthToo-v0.4-global-light-lowlands.zip`
 
-This is the best working water checkpoint so far; minor flicker/hollows remain for later cleanup.
+Water works for now, but the coast/ocean rendering path is temporary technical debt.
